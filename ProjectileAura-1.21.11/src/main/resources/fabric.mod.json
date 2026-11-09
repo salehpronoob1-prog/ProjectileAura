@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "id": "projectile-aura",
+  "version": "${version}",
+  "name": "ProjectileAura",
+  "description": "Configurable arrow trajectory aiming for custom left-click weapons.",
+  "environment": "client",
+  "entrypoints": {"meteor": ["dev.projectileaura.ProjectileAuraAddon"]},
+  "depends": {"java": ">=21", "minecraft": "1.21.11", "meteor-client": "*"}
+}
