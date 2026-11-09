@@ -1,10 +1,25 @@
+
 {
   "schemaVersion": 1,
   "id": "projectile-aura",
   "version": "${version}",
   "name": "ProjectileAura",
   "description": "Configurable arrow trajectory aiming for custom left-click weapons.",
+  "authors": [
+    "salehpronoob1-prog"
+  ],
   "environment": "client",
-  "entrypoints": {"meteor": ["dev.projectileaura.ProjectileAuraAddon"]},
-  "depends": {"java": ">=21", "minecraft": "1.21.11", "meteor-client": "*"}
+  "entrypoints": {
+    "meteor": [
+      "dev.projectileaura.ProjectileAuraAddon"
+    ]
+  },
+  "custom": {
+    "meteor-client:color": "50,180,255"
+  },
+  "depends": {
+    "java": ">=21",
+    "minecraft": "1.21.11",
+    "meteor-client": "*"
+  }
 }
