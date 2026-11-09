@@ -17,9 +17,10 @@ repositories {
 
 dependencies {
     minecraft(libs.minecraft)
+    mappings(loom.officialMojangMappings())
 
-    implementation(libs.fabric.loader)
-    implementation(libs.meteor.client)
+    modImplementation(libs.fabric.loader)
+    modImplementation(libs.meteor.client)
 }
 
 java {
@@ -38,4 +39,9 @@ tasks.processResources {
     filesMatching("fabric.mod.json") {
         expand(props)
     }
+}
+
+tasks.withType<JavaCompile>().configureEach {
+    options.encoding = "UTF-8"
+    options.release.set(21)
 }
