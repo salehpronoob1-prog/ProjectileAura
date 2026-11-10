@@ -214,7 +214,7 @@ public class ProjectileAuraModule extends Module {
 
         // Left click only when the new view is aligned, in gameplay, and
         // after the configured interval. Uses Meteor's built-in click helper.
-        if (!autoFire.get() || mc.gui.screen() != null) return;
+        if (!autoFire.get() || mc.screen != null) return;
         fireTimer++;
         if (fireTimer < fireInterval.get()) return;
 
