@@ -8,6 +8,9 @@ public class ProjectileAuraAddon extends MeteorAddon {
     public static final Category CATEGORY = new Category("ProjectileAura");
 
     @Override public void onRegisterCategories() { Modules.registerCategory(CATEGORY); }
-    @Override public void onInitialize() { Modules.get().add(new ProjectileAuraModule()); }
+    @Override public void onInitialize() {
+        Modules.get().add(new ProjectileAuraModule());
+        Modules.get().add(new SpawnReturnModule());
+    }
     @Override public String getPackage() { return "dev.projectileaura"; }
 }
