@@ -11,7 +11,7 @@ public class ProjectileAuraAddon extends MeteorAddon {
     @Override public void onInitialize() {
         Modules.get().add(new ProjectileAuraModule());
         Modules.get().add(new SpawnReturnModule());
-        Modules.get().add(new DisconnectModule());
+        Modules.get().add(new ServerCheckModule());
     }
     @Override public String getPackage() { return "dev.projectileaura"; }
 }
