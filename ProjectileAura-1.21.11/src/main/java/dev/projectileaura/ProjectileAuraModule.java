@@ -83,6 +83,11 @@ public class ProjectileAuraModule extends Module {
         .name("auto-fire").description("Automatically left-click when correctly aimed at the nearest valid enemy.")
         .defaultValue(true).build());
 
+    private final Setting<Boolean> fireInGuis = attack.add(new BoolSetting.Builder()
+        .name("fire-in-guis")
+        .description("Keep firing while inventory and other client screens are open. Can interact with menus depending on the server.")
+        .defaultValue(true).visible(autoFire::get).build());
+
     private final Setting<Integer> fireInterval = attack.add(new IntSetting.Builder()
         .name("fire-interval-ticks").description("Minimum client ticks between left clicks (20 ticks = about 1 second).")
         .defaultValue(5).min(1).sliderRange(1, 40)
@@ -92,6 +97,18 @@ public class ProjectileAuraModule extends Module {
         .name("fire-aim-tolerance").description("Maximum yaw and pitch error, in degrees, before firing.")
         .defaultValue(2.0).min(0.01).sliderRange(0.25, 15.0)
         .decimalPlaces(2).onSliderRelease().visible(autoFire::get).build());
+
+    private static volatile long lastAutoFireNanos;
+
+    public static long getLastAutoFireNanos() {
+        return lastAutoFireNanos;
+    }
+
+    public boolean matchesSelectedEntity(LivingEntity entity) {
+        if (entity == null || !entity.isAlive() || !entities.get().contains(entity.getType())) return false;
+        String filter = nameContains.get().trim().toLowerCase(Locale.ROOT);
+        return filter.isEmpty() || entity.getName().getString().toLowerCase(Locale.ROOT).contains(filter);
+    }
 
     private static final long SAFETY_RESCAN_NANOS = 30_000_000_000L;
     private long nextSafetyRescan;
@@ -212,9 +229,9 @@ public class ProjectileAuraModule extends Module {
         mc.player.setXRot(Math.max(-90, Math.min(90,
             mc.player.getXRot() + clamp(pitchDelta, step))));
 
-        // Left click only when the new view is aligned, in gameplay, and
-        // after the configured interval. Uses Meteor's built-in click helper.
-        if (!autoFire.get() || mc.screen != null) return;
+        // Optionally run while screens are open, as requested for inventory use.
+        // Meteor's Utils.leftClick invokes the in-game attack action directly.
+        if (!autoFire.get() || (mc.screen != null && !fireInGuis.get())) return;
         fireTimer++;
         if (fireTimer < fireInterval.get()) return;
 
@@ -222,6 +239,7 @@ public class ProjectileAuraModule extends Module {
         double pitchError = Math.abs(desiredPitch - mc.player.getXRot());
         if (yawError <= fireTolerance.get() && pitchError <= fireTolerance.get()) {
             Utils.leftClick();
+            lastAutoFireNanos = System.nanoTime();
             fireTimer = 0;
         }
     }
