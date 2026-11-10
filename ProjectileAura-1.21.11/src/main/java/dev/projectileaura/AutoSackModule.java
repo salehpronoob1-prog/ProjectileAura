@@ -15,7 +15,7 @@ import net.minecraft.world.item.Items;
 import java.util.Locale;
 
 /**
- * Once per interval: /sack -> wait for the Sack Selection Menu -> click Insert Inventory.
+ * Once per interval: /sack -> wait for the Sack Selection Menu -> click Insert Inventory -> close that menu.
  * Does not interact with any other GUIs or inventory slots.
  */
 public class AutoSackModule extends Module {
@@ -39,6 +39,7 @@ public class AutoSackModule extends Module {
     private long nextCommandAt;
     private long menuDeadlineAt;
     private boolean waitingForSackMenu;
+    private AbstractContainerScreen<?> pendingCloseScreen;
 
     public AutoSackModule() {
         super(ProjectileAuraAddon.CATEGORY, "auto-sack",
@@ -50,11 +51,13 @@ public class AutoSackModule extends Module {
         nextCommandAt = 0; // Run on the next safe game tick, then every 60 seconds.
         menuDeadlineAt = 0;
         waitingForSackMenu = false;
+        pendingCloseScreen = null;
     }
 
     @Override
     public void onDeactivate() {
         waitingForSackMenu = false;
+        pendingCloseScreen = null;
         menuDeadlineAt = 0;
     }
 
@@ -62,6 +65,20 @@ public class AutoSackModule extends Module {
     private void onTick(TickEvent.Post event) {
         if (mc.player == null || mc.level == null || mc.gameMode == null) {
             waitingForSackMenu = false;
+            pendingCloseScreen = null;
+            return;
+        }
+
+        // Close one tick after clicking so the click packet is sent first.
+        // Only close the exact screen we clicked, never a different newly opened GUI.
+        if (pendingCloseScreen != null) {
+            AbstractContainerScreen<?> clickedScreen = pendingCloseScreen;
+            pendingCloseScreen = null;
+            if (mc.screen == clickedScreen
+                && SACK_MENU_TITLE.equals(clickedScreen.getTitle().getString())
+                && mc.player.containerMenu == clickedScreen.getMenu()) {
+                clickedScreen.onClose();
+            }
             return;
         }
 
@@ -97,6 +114,7 @@ public class AutoSackModule extends Module {
 
             waitingForSackMenu = false; // One click per /sack, never repeat inside the same GUI.
             InvUtils.click().slotId(INSERT_SLOT_ID);
+            pendingCloseScreen = screen;
             return;
         }
 
