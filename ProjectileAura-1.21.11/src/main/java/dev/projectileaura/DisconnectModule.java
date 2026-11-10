@@ -1,262 +1,313 @@
 package dev.projectileaura;
 
+import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.client.gui.screens.ConnectScreen;
 import net.minecraft.client.gui.screens.DisconnectedScreen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.client.multiplayer.resolver.ServerAddress;
+import net.minecraft.world.scores.DisplaySlot;
+import net.minecraft.world.scores.Objective;
 
 import java.util.Locale;
 
 /**
- * Reconnect watchdog for a stalled /home loop.
- * It runs in menus, but ONLY acts when explicitly configured to the currently joined server.
+ * Independent server watchdog. No /home commands, no SpawnReturn dependency.
+ * Reconnects to the configured endpoint when disconnected or sent to a lobby.
  */
 public class DisconnectModule extends Module {
-    private static final long SECOND = 1_000_000_000L;
+    private static final long NS_PER_SECOND = 1_000_000_000L;
 
     private final SettingGroup general = settings.getDefaultGroup();
-    private final SettingGroup recovery = settings.createGroup("Recovery");
+    private final SettingGroup detection = settings.createGroup("Redirect Detection");
+    private final SettingGroup retry = settings.createGroup("Reconnect");
 
-    private final Setting<String> serverAddress = general.add(new StringSetting.Builder()
-        .name("server-address")
-        .description("The exact original server address (with optional port). Blank disables reconnection.")
+    private final Setting<String> targetServer = general.add(new StringSetting.Builder()
+        .name("target-server")
+        .description("Server to remain connected to, for example battlepet.minehut.gg. Blank disables recovery.")
         .defaultValue("").build());
 
-    private final Setting<Integer> failedHomeAttempts = recovery.add(new IntSetting.Builder()
-        .name("failed-home-attempts")
-        .description("Number of /home attempts that must fail before reconnecting.")
-        .defaultValue(3).min(2).sliderRange(2, 10).build());
+    private final Setting<Boolean> detectOtherServer = detection.add(new BoolSetting.Builder()
+        .name("detect-server-change")
+        .description("Reconnect if the client shows a different server address than the target.")
+        .defaultValue(true).build());
 
-    private final Setting<Double> homeResultDelay = recovery.add(new DoubleSetting.Builder()
-        .name("home-result-seconds")
-        .description("Wait after the latest /home before treating attempts as failed.")
+    private final Setting<Boolean> detectFallbackChat = detection.add(new BoolSetting.Builder()
+        .name("detect-minehut-fallback-chat")
+        .description("Treat known Minehut fallback/lobby messages as a redirect.")
+        .defaultValue(true).build());
+
+    private final Setting<String> lobbyScoreboard = detection.add(new StringSetting.Builder()
+        .name("lobby-scoreboard-text")
+        .description("Optional unique text in the Minehut lobby sidebar TITLE. Leave empty if unknown.")
+        .defaultValue("").build());
+
+    private final Setting<String> customRedirectMessage = detection.add(new StringSetting.Builder()
+        .name("redirect-chat-text")
+        .description("Optional additional case-insensitive chat phrase announcing a lobby redirect.")
+        .defaultValue("").build());
+
+    private final Setting<Double> connectTimeout = retry.add(new DoubleSetting.Builder()
+        .name("connect-timeout-seconds")
+        .description("Cancel an attempted connection if it does not join within this many seconds.")
         .defaultValue(10).min(1).sliderRange(3, 30).onSliderRelease().build());
 
-    private final Setting<Double> connectionTimeout = recovery.add(new DoubleSetting.Builder()
-        .name("connect-timeout-seconds")
-        .description("Time allowed to rejoin the same server.")
-        .defaultValue(10).min(1).sliderRange(5, 30).onSliderRelease().build());
-
-    private final Setting<Double> retryDelay = recovery.add(new DoubleSetting.Builder()
+    private final Setting<Double> retryDelay = retry.add(new DoubleSetting.Builder()
         .name("retry-delay-seconds")
-        .description("Wait after failed/slow connection attempts before trying again.")
+        .description("Wait after a failed connection before trying again.")
         .defaultValue(30).min(1).sliderRange(5, 90).onSliderRelease().build());
 
-    private final Setting<Integer> maxRetries = recovery.add(new IntSetting.Builder()
-        .name("max-retries")
-        .description("Maximum reconnection attempts in one recovery cycle (0 = unlimited).")
-        .defaultValue(10).min(0).sliderRange(0, 30).build());
+    private final Setting<Double> verifySeconds = retry.add(new DoubleSetting.Builder()
+        .name("verify-joined-seconds")
+        .description("Allow lobby messages/scoreboards to appear before accepting a reconnect as successful.")
+        .defaultValue(4).min(1).sliderRange(2, 15).onSliderRelease().build());
 
-    private enum State { IDLE, START_DELAY, CONNECTING, RETRY_DELAY, ABORTED }
-    private State state = State.IDLE;
+    private final Setting<Integer> maxAttempts = retry.add(new IntSetting.Builder()
+        .name("max-attempts")
+        .description("Maximum connection attempts before stopping; 0 retries indefinitely.")
+        .defaultValue(0).min(0).sliderRange(0, 30).build());
 
-    private String originalServer;
-    private long nextActionAt;
-    private long connectStartedAt;
+    private enum State { WATCHING, WAITING, CONNECTING, VERIFYING, STOPPED }
+    private State state = State.WATCHING;
+    private String savedTarget;
+    private boolean redirectSeen;
+    private long stateSince;
+    private long nextAttemptAt;
     private int attempts;
-    private String reason;
+    private String stopReason;
 
     public DisconnectModule() {
         super(ProjectileAuraAddon.CATEGORY, "disconnect",
-            "Recover from a stuck home-return loop by safely reconnecting to the same configured server.");
-        // Ticks must keep arriving while Minecraft is in the title/disconnected screens.
+            "Keep Minecraft on a selected server. Rejoin after disconnects or Minehut lobby redirects.");
+        // Essential: TickEvent still runs while the Minecraft menu is displayed.
         runInMainMenu = true;
     }
 
-    @Override public void onActivate() {
+    @Override
+    public void onActivate() {
         reset();
     }
 
-    @Override public void onDeactivate() {
+    @Override
+    public void onDeactivate() {
         reset();
     }
 
     private void reset() {
-        state = State.IDLE;
+        state = State.WATCHING;
+        savedTarget = null;
+        redirectSeen = false;
         attempts = 0;
-        originalServer = null;
-        nextActionAt = 0;
-        connectStartedAt = 0;
-        reason = null;
+        stateSince = 0;
+        nextAttemptAt = 0;
+        stopReason = null;
+    }
+
+    @EventHandler
+    private void onChat(ReceiveMessageEvent event) {
+        if (mc.level == null || mc.player == null || event.getMessage() == null) return;
+        if (normalize(targetServer.get()) == null) return;
+
+        String message = event.getMessage().getString().toLowerCase(Locale.ROOT);
+        if (message.isBlank()) return;
+
+        boolean common = detectFallbackChat.get()
+            && (message.contains("fallback server")
+                || message.contains("sent to a lobby")
+                || message.contains("sent to the lobby")
+                || message.contains("connected to a lobby")
+                || message.contains("previously on went down"));
+
+        String custom = customRedirectMessage.get().trim().toLowerCase(Locale.ROOT);
+        if (common || (!custom.isEmpty() && message.contains(custom))) {
+            redirectSeen = true;
+        }
     }
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
         long now = System.nanoTime();
+        String configured = normalize(targetServer.get());
 
-        if (state == State.IDLE) {
-            checkStuckHomeLoop(now);
+        // Empty or malformed destination: no attempts, no disconnects.
+        if (configured == null) {
+            if (state != State.WATCHING || savedTarget != null) reset();
             return;
         }
 
-        // Clearing the setting disarms all pending reconnect activity.
-        if (serverAddress.get().trim().isEmpty()) {
-            state = State.ABORTED;
-            reason = "Missing server";
-            return;
+        // Changing the desired server re-arms the monitor and resets the retry count.
+        if (!configured.equals(savedTarget)) {
+            savedTarget = configured;
+            redirectSeen = false;
+            state = State.WATCHING;
+            attempts = 0;
+            nextAttemptAt = 0;
+            stopReason = null;
         }
 
-        if (state == State.ABORTED) return;
+        if (state == State.STOPPED) return;
 
-        String configured = normalize(serverAddress.get());
-        if (configured == null || !configured.equals(originalServer)) {
-            state = State.ABORTED;
-            reason = "Server changed";
-            return;
+        boolean inWorld = mc.level != null && mc.player != null;
+        if (inWorld) {
+            processWorld(now, configured);
+        } else {
+            processMenus(now, configured);
         }
+    }
 
-        // Never continue on an unexpected server, even after joining.
-        if (mc.level != null && mc.player != null) {
-            String joined = currentServer();
-            if (joined == null || !joined.equals(originalServer)) {
-                state = State.ABORTED;
-                reason = "Wrong server";
-                return;
+    private void processWorld(long now, String expected) {
+        String current = currentServerAddress();
+        boolean wrongAddress = detectOtherServer.get() && current != null && !expected.equals(current);
+        boolean lobby = redirectSeen || lobbySidebarDetected();
+
+        if (wrongAddress || lobby) {
+            // Wait a short moment to avoid racing world transitions or scoreboard changes.
+            if (state != State.WAITING) {
+                state = State.WAITING;
+                stateSince = now;
             }
-
-            if (state == State.CONNECTING) {
-                state = State.IDLE;
-                attempts = 0;
-                SpawnReturnModule home = Modules.get().get(SpawnReturnModule.class);
-                if (home != null) home.resetHomeAttempts();
-                info("Reconnected to (highlight)%s(default).", originalServer);
-            }
-            return;
-        }
-
-        if (state == State.START_DELAY || state == State.RETRY_DELAY) {
-            if (now - nextActionAt >= 0) startConnection(now);
-        } else if (state == State.CONNECTING) {
-            if (mc.screen instanceof DisconnectedScreen) {
-                scheduleRetry(now, "Connection failed");
-            } else if (now - connectStartedAt >= seconds(connectionTimeout.get())) {
-                // Cancel the current ConnectScreen by returning to the title screen.
-                // A late connection is invalidated by the screen's cancellation handler.
+            if (now - stateSince >= seconds(2)) {
+                // If the client has been transferred into the Minehut hub, close
+                // that connection and rejoin the desired server, NOT the hub.
+                redirectSeen = false;
                 mc.disconnect(new TitleScreen(), false);
-                scheduleRetry(now, "Connection timeout");
+                nextAttemptAt = now + seconds(1);
+                state = State.WAITING;
+                stateSince = now;
             }
+            return;
+        }
+
+        // The correct endpoint is connected. Do not trust an instant transition:
+        // allow messages and sidebar to load before confirming success.
+        if (state != State.WATCHING && state != State.VERIFYING) {
+            state = State.VERIFYING;
+            stateSince = now;
+        } else if (state == State.VERIFYING && now - stateSince >= seconds(verifySeconds.get())) {
+            state = State.WATCHING;
+            attempts = 0;
+            redirectSeen = false;
+            stopReason = null;
         }
     }
 
-    private void checkStuckHomeLoop(long now) {
-        if (mc.player == null || mc.level == null || mc.getCurrentServer() == null) return;
-        if (serverAddress.get().trim().isEmpty()) return;
-
-        SpawnReturnModule home = Modules.get().get(SpawnReturnModule.class);
-        if (home == null || !home.isActive() ||
-            !home.isCheckpointConfigured() || !home.isOutsideCheckpoint() ||
-            home.hasNearbyEnemiesForReturn() ||
-            home.getUnsuccessfulHomeAttempts() < failedHomeAttempts.get()) return;
-
-        long lastHome = home.getLastCommandAttemptNanos();
-        if (lastHome == 0 || now - lastHome < seconds(homeResultDelay.get())) return;
-
-        String configured = normalize(serverAddress.get());
-        String connected = currentServer();
-        if (configured == null || connected == null || !configured.equals(connected)) return;
-
-        originalServer = connected;
-        attempts = 0;
-        reason = null;
-        state = State.START_DELAY;
-        nextActionAt = now + SECOND;
-
-        // Disconnect only from the matched original server.
-        mc.disconnect(new TitleScreen(), false);
-        info("Stuck /home detected. Reconnecting to (highlight)%s(default).", originalServer);
-    }
-
-    private void startConnection(long now) {
-        if (maxRetries.get() != 0 && attempts >= maxRetries.get()) {
-            state = State.ABORTED;
-            reason = "Retry limit";
-            return;
-        }
-        if (mc.player != null || mc.level != null) {
-            state = State.ABORTED;
-            reason = "Unexpected session";
-            return;
-        }
-
-        String addressText = serverAddress.get().trim();
-        if (addressText.isEmpty()) {
-            state = State.ABORTED;
-            reason = "Missing server";
-            return;
-        }
-
-        ServerAddress address;
-        try {
-            if (!ServerAddress.isValidAddress(addressText)) {
-                state = State.ABORTED;
-                reason = "Invalid address";
+    private void processMenus(long now, String expected) {
+        if (state == State.CONNECTING) {
+            if (mc.screen instanceof DisconnectedScreen) {
+                scheduleRetry(now);
                 return;
             }
-            address = ServerAddress.parseString(addressText);
-        } catch (RuntimeException e) {
-            state = State.ABORTED;
-            reason = "Invalid address";
+            if (now - stateSince >= seconds(connectTimeout.get())) {
+                cancelInFlightConnection();
+                scheduleRetry(now);
+            }
             return;
         }
 
-        // Only explicit, normalized, exact endpoint matches are permitted.
-        if (!normalize(addressText).equals(originalServer)) {
-            state = State.ABORTED;
-            reason = "Server mismatch";
+        if (state == State.VERIFYING || state == State.WATCHING) {
+            // We are no longer in a world. Try the target directly.
+            state = State.WAITING;
+            nextAttemptAt = now;
+        }
+
+        if (state == State.WAITING && now - nextAttemptAt >= 0L) {
+            connect(now, expected);
+        }
+    }
+
+    private void connect(long now, String expected) {
+        if (maxAttempts.get() > 0 && attempts >= maxAttempts.get()) {
+            stop("Retry limit reached");
             return;
         }
 
-        attempts++;
-        connectStartedAt = now;
-        state = State.CONNECTING;
-        ServerData data = new ServerData("ProjectileAura Recovery", addressText, ServerData.Type.OTHER);
-        ConnectScreen.startConnecting(new TitleScreen(), mc, address, data, false, null);
+        // A GUI for an old connection may be open; cancel it before opening a new one.
+        if (mc.screen instanceof ConnectScreen) cancelInFlightConnection();
+
+        String addressText = targetServer.get().trim();
+        if (!expected.equals(normalize(addressText))) {
+            stop("Server address changed");
+            return;
+        }
+
+        try {
+            ServerAddress address = ServerAddress.parseString(addressText);
+            ServerData info = new ServerData("ProjectileAura Target", addressText, ServerData.Type.OTHER);
+
+            attempts++;
+            state = State.CONNECTING;
+            stateSince = now;
+            redirectSeen = false;
+            ConnectScreen.startConnecting(new TitleScreen(), mc, address, info, false, null);
+        } catch (RuntimeException exception) {
+            scheduleRetry(now);
+        }
     }
 
-    private void scheduleRetry(long now, String why) {
-        if (mc.screen instanceof ConnectScreen) mc.disconnect(new TitleScreen(), false);
-        nextActionAt = now + seconds(retryDelay.get());
-        state = State.RETRY_DELAY;
-        reason = why;
+    private void scheduleRetry(long now) {
+        if (mc.screen instanceof ConnectScreen) cancelInFlightConnection();
+        state = State.WAITING;
+        nextAttemptAt = now + seconds(retryDelay.get());
+        stateSince = now;
     }
 
-    private String currentServer() {
-        ServerData info = mc.getCurrentServer();
-        if (info == null || info.isRealm()) return null;
-        return normalize(info.ip);
+    private void cancelInFlightConnection() {
+        if (mc.screen instanceof ConnectScreen screen) {
+            // ConnectScreen.onClose performs the same cancellation as Escape.
+            screen.onClose();
+            mc.setScreen(new TitleScreen());
+        }
     }
 
-    private static String normalize(String text) {
-        String raw = text == null ? "" : text.trim();
-        if (raw.isEmpty() || raw.contains("/") || raw.contains(" ") || raw.contains("\\") ||
-            raw.contains("\n") || raw.contains("\r")) return null;
+    private boolean lobbySidebarDetected() {
+        if (mc.level == null) return false;
+        String marker = lobbyScoreboard.get().trim().toLowerCase(Locale.ROOT);
+        if (marker.isEmpty()) return false;
+        Objective sidebar = mc.level.getScoreboard().getDisplayObjective(DisplaySlot.SIDEBAR);
+        return sidebar != null && sidebar.getDisplayName().getString().toLowerCase(Locale.ROOT).contains(marker);
+    }
+
+    private String currentServerAddress() {
+        ServerData server = mc.getCurrentServer();
+        return server == null || server.isRealm() ? null : normalize(server.ip);
+    }
+
+    private static String normalize(String input) {
+        if (input == null) return null;
+        String raw = input.trim();
+        if (raw.isEmpty() || raw.contains("/") || raw.contains("\\") || raw.contains(" ")
+            || raw.contains("\r") || raw.contains("\n")) return null;
         try {
             if (!ServerAddress.isValidAddress(raw)) return null;
-            ServerAddress address = ServerAddress.parseString(raw);
-            return address.getHost().toLowerCase(Locale.ROOT) + ":" + address.getPort();
+            ServerAddress parsed = ServerAddress.parseString(raw);
+            return parsed.getHost().toLowerCase(Locale.ROOT) + ":" + parsed.getPort();
         } catch (RuntimeException e) {
             return null;
         }
     }
 
     private static long seconds(double value) {
-        if (!Double.isFinite(value)) return 30 * SECOND;
-        return (long) (Math.max(0, Math.min(value, 3600)) * SECOND);
+        if (!Double.isFinite(value)) return 30L * NS_PER_SECOND;
+        return (long) (Math.max(0, Math.min(value, 3600)) * NS_PER_SECOND);
     }
 
-    @Override public String getInfoString() {
+    private void stop(String message) {
+        state = State.STOPPED;
+        stopReason = message;
+    }
+
+    @Override
+    public String getInfoString() {
         return switch (state) {
-            case IDLE -> "Watching";
-            case START_DELAY -> "Disconnecting";
+            case WATCHING -> "Monitoring";
+            case WAITING -> "Retry " + attempts;
             case CONNECTING -> "Connecting " + attempts;
-            case RETRY_DELAY -> "Retry " + attempts;
-            case ABORTED -> reason == null ? "Stopped" : reason;
+            case VERIFYING -> "Verifying";
+            case STOPPED -> stopReason == null ? "Stopped" : stopReason;
         };
     }
 }
