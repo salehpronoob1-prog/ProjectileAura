@@ -94,6 +94,30 @@ public class SpawnReturnModule extends Module {
     private boolean deathObserved;
     private long noEnemiesSince;
     private long nextAttemptAt;
+    // Consecutive commands sent while still outside the configured checkpoint.
+    private int unsuccessfulHomeAttempts;
+    private long lastCommandAttemptNanos;
+
+    public boolean isCheckpointConfigured() {
+        return checkPosition.get();
+    }
+
+    public boolean isOutsideCheckpoint() {
+        return mc.player != null && mc.level != null && checkPosition.get() && !atCheckpoint();
+    }
+
+    public int getUnsuccessfulHomeAttempts() {
+        return isActive() && isOutsideCheckpoint() ? unsuccessfulHomeAttempts : 0;
+    }
+
+    public long getLastCommandAttemptNanos() {
+        return lastCommandAttemptNanos;
+    }
+
+    public void resetHomeAttempts() {
+        unsuccessfulHomeAttempts = 0;
+        lastCommandAttemptNanos = 0;
+    }
 
     public SpawnReturnModule() {
         super(ProjectileAuraAddon.CATEGORY, "spawn-return",
@@ -105,11 +129,13 @@ public class SpawnReturnModule extends Module {
         deathObserved = false;
         noEnemiesSince = 0;
         nextAttemptAt = 0;
+        resetHomeAttempts();
     }
 
     @Override public void onDeactivate() {
         pendingDeathReturn = false;
         noEnemiesSince = 0;
+        resetHomeAttempts();
     }
 
     @EventHandler private void onDeathScreen(OpenScreenEvent event) {
@@ -141,6 +167,7 @@ public class SpawnReturnModule extends Module {
         if (deathObserved) deathObserved = false;
 
         boolean outside = checkPosition.get() && !atCheckpoint();
+        if (!outside && checkPosition.get()) resetHomeAttempts();
         if (!pendingDeathReturn && !outside) return;
 
         // Don't send commands while a death screen is still visible.
@@ -166,6 +193,8 @@ public class SpawnReturnModule extends Module {
         // Send only a single command, never a batch or multi-line input.
         if (cmd.contains("\n") || cmd.contains("\r")) return;
         ChatUtils.sendPlayerMsg(cmd, false);
+        if (outside && unsuccessfulHomeAttempts < 1_000_000) unsuccessfulHomeAttempts++;
+        lastCommandAttemptNanos = now;
 
         pendingDeathReturn = false;
         nextAttemptAt = now + (long) (retrySeconds.get() * NANOSECONDS_PER_SECOND);
