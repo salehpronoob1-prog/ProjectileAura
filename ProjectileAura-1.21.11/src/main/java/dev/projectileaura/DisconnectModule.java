@@ -8,6 +8,7 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.client.gui.screens.ConnectScreen;
 import net.minecraft.client.gui.screens.DisconnectedScreen;
 import net.minecraft.client.gui.screens.TitleScreen;
+import net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.client.multiplayer.resolver.ServerAddress;
 import net.minecraft.world.scores.DisplaySlot;
@@ -174,10 +175,11 @@ public class DisconnectModule extends Module {
                 // If the client has been transferred into the Minehut hub, close
                 // that connection and rejoin the desired server, NOT the hub.
                 redirectSeen = false;
-                mc.disconnect(new TitleScreen(), false);
-                nextAttemptAt = now + seconds(1);
+                // Disconnect to the Multiplayer server-selection screen first.
                 state = State.WAITING;
                 stateSince = now;
+                nextAttemptAt = now + seconds(2);
+                mc.disconnect(new JoinMultiplayerScreen(new TitleScreen()), false);
             }
             return;
         }
@@ -209,13 +211,15 @@ public class DisconnectModule extends Module {
         }
 
         if (state == State.VERIFYING || state == State.WATCHING) {
-            // We are no longer in a world. Try the target directly.
+            // Lost the server: visibly return to Multiplayer before reconnecting.
             state = State.WAITING;
-            nextAttemptAt = now;
+            nextAttemptAt = now + seconds(1);
         }
 
-        if (state == State.WAITING && now - nextAttemptAt >= 0L) {
-            connect(now, expected);
+        if (state == State.WAITING) {
+            // Show server selection for the full waiting/retry interval.
+            showServerSelection();
+            if (now - nextAttemptAt >= 0L) connect(now, expected);
         }
     }
 
@@ -242,7 +246,8 @@ public class DisconnectModule extends Module {
             state = State.CONNECTING;
             stateSince = now;
             redirectSeen = false;
-            ConnectScreen.startConnecting(new TitleScreen(), mc, address, info, false, null);
+            // Use Multiplayer as parent so connection failures/cancel return there.
+            ConnectScreen.startConnecting(getServerSelection(), mc, address, info, false, null);
         } catch (RuntimeException exception) {
             scheduleRetry(now);
         }
@@ -250,16 +255,30 @@ public class DisconnectModule extends Module {
 
     private void scheduleRetry(long now) {
         if (mc.screen instanceof ConnectScreen) cancelInFlightConnection();
+        showServerSelection();
         state = State.WAITING;
         nextAttemptAt = now + seconds(retryDelay.get());
         stateSince = now;
     }
 
+    private JoinMultiplayerScreen getServerSelection() {
+        if (mc.screen instanceof JoinMultiplayerScreen menu) return menu;
+        JoinMultiplayerScreen menu = new JoinMultiplayerScreen(new TitleScreen());
+        mc.setScreen(menu);
+        return menu;
+    }
+
+    private void showServerSelection() {
+        if (mc.level == null && !(mc.screen instanceof JoinMultiplayerScreen)) {
+            mc.setScreen(new JoinMultiplayerScreen(new TitleScreen()));
+        }
+    }
+
     private void cancelInFlightConnection() {
         if (mc.screen instanceof ConnectScreen screen) {
-            // ConnectScreen.onClose performs the same cancellation as Escape.
+            // Cancel the attempt first; return to the Multiplayer server list.
             screen.onClose();
-            mc.setScreen(new TitleScreen());
+            mc.setScreen(new JoinMultiplayerScreen(new TitleScreen()));
         }
     }
 
