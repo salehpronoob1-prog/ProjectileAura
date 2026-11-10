@@ -208,6 +208,10 @@ public class SpawnReturnModule extends Module {
         return dx * dx + dz * dz <= tolerance.get() * tolerance.get() && dy <= yTolerance.get();
     }
 
+    public boolean hasNearbyEnemiesForReturn() {
+        return mc.player == null || mc.level == null || hasNearbyEnemies();
+    }
+
     private boolean hasNearbyEnemies() {
         double r2 = nearbyRange.get() * nearbyRange.get();
         ProjectileAuraModule aura = Modules.get().get(ProjectileAuraModule.class);
