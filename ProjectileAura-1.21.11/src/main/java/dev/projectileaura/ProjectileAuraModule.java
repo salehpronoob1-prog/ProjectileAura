@@ -1,6 +1,7 @@
 package dev.projectileaura;
 
 import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.friends.Friends;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -14,11 +15,12 @@ import net.minecraft.world.phys.Vec3;
 import java.util.Locale;
 import java.util.Set;
 
-/** ProjectileAura 0.2: stable trajectory prediction and configurable target selection. */
+/** ProjectileAura 0.3: closest-first projectile combat with periodic recovery scan. */
 public class ProjectileAuraModule extends Module {
     private final SettingGroup physics = settings.getDefaultGroup();
     private final SettingGroup targeting = settings.createGroup("Targeting");
     private final SettingGroup rotation = settings.createGroup("Rotation");
+    private final SettingGroup attack = settings.createGroup("Attack");
 
     // Slider ranges are for quick adjustment. Typed numeric values may extend
     // beyond those ranges, subject to physical safety checks in Ballistics.
@@ -64,10 +66,6 @@ public class ProjectileAuraModule extends Module {
         .name("lead-moving-targets").description("Lead moving targets using smoothed entity velocity.")
         .defaultValue(true).build());
 
-    private final Setting<Boolean> sticky = targeting.add(new BoolSetting.Builder()
-        .name("sticky-target").description("Retain current valid target instead of jumping between mobs.")
-        .defaultValue(true).build());
-
     private final Setting<Boolean> requireSight = targeting.add(new BoolSetting.Builder()
         .name("require-line-of-sight").description("Avoid locking onto entities hidden behind walls.")
         .defaultValue(true).build());
@@ -81,6 +79,23 @@ public class ProjectileAuraModule extends Module {
         .defaultValue(12).min(0.01).sliderRange(1, 180).decimalPlaces(2)
         .onSliderRelease().build());
 
+    private final Setting<Boolean> autoFire = attack.add(new BoolSetting.Builder()
+        .name("auto-fire").description("Automatically left-click when correctly aimed at the nearest valid enemy.")
+        .defaultValue(true).build());
+
+    private final Setting<Integer> fireInterval = attack.add(new IntSetting.Builder()
+        .name("fire-interval-ticks").description("Minimum client ticks between left clicks (20 ticks = about 1 second).")
+        .defaultValue(5).min(1).sliderRange(1, 40)
+        .visible(autoFire::get).build());
+
+    private final Setting<Double> fireTolerance = attack.add(new DoubleSetting.Builder()
+        .name("fire-aim-tolerance").description("Maximum yaw and pitch error, in degrees, before firing.")
+        .defaultValue(2.0).min(0.01).sliderRange(0.25, 15.0)
+        .decimalPlaces(2).onSliderRelease().visible(autoFire::get).build());
+
+    private static final long SAFETY_RESCAN_NANOS = 30_000_000_000L;
+    private long nextSafetyRescan;
+    private int fireTimer;
     private LivingEntity lockedTarget;
     private Vec3 smoothedMotion = Vec3.ZERO;
 
@@ -89,12 +104,17 @@ public class ProjectileAuraModule extends Module {
             "Stable aiming for custom arrow weapons, with adjustable projectile physics.");
     }
 
-    @Override public void onActivate() { resetTarget(); }
+    @Override public void onActivate() {
+        resetTarget();
+        nextSafetyRescan = System.nanoTime() + SAFETY_RESCAN_NANOS;
+    }
+
     @Override public void onDeactivate() { resetTarget(); }
 
     private void resetTarget() {
         lockedTarget = null;
         smoothedMotion = Vec3.ZERO;
+        fireTimer = 0;
     }
 
     private boolean validTarget(LivingEntity entity, String filter, double limitSquared) {
@@ -105,32 +125,60 @@ public class ProjectileAuraModule extends Module {
         return !requireSight.get() || PlayerUtils.canSeeEntity(entity);
     }
 
-    private LivingEntity selectTarget(String filter, double limitSquared) {
-        if (sticky.get() && lockedTarget != null && validTarget(lockedTarget, filter, limitSquared)) return lockedTarget;
+    /**
+     * Always scans ALL loaded/renderable candidates to select the closest valid entity.
+     * Using squared distance avoids unnecessary square roots and ensures consistent order.
+     */
+    private LivingEntity selectClosestTarget(String filter, double limitSquared) {
         LivingEntity nearest = null;
-        double best = limitSquared;
+        double best = Double.POSITIVE_INFINITY;
+
         for (var entity : mc.level.entitiesForRendering()) {
             if (!(entity instanceof LivingEntity living) || !validTarget(living, filter, limitSquared)) continue;
-            double d = mc.player.distanceToSqr(living);
-            if (d < best) { best = d; nearest = living; }
+
+            double distance = mc.player.distanceToSqr(living);
+            if (!Double.isFinite(distance)) continue;
+
+            // Deterministic tie-break to avoid toggling rapidly between equidistant mobs.
+            if (distance < best - 1e-7 ||
+                (Math.abs(distance - best) <= 1e-7 &&
+                 (nearest == null || living.getId() < nearest.getId()))) {
+                nearest = living;
+                best = distance;
+            }
         }
         return nearest;
     }
 
     @EventHandler private void onTick(TickEvent.Pre event) {
-        if (mc.player == null || mc.level == null) { resetTarget(); return; }
-        if (!aim.get()) return;
+        if (mc.player == null || mc.level == null) {
+            resetTarget();
+            return;
+        }
 
         String filter = nameContains.get().trim().toLowerCase(Locale.ROOT);
         double limitSquared = range.get() * range.get();
-        if (!Double.isFinite(limitSquared)) return;
+        if (!Double.isFinite(limitSquared)) { resetTarget(); return; }
 
-        LivingEntity target = selectTarget(filter, limitSquared);
-        if (target != lockedTarget) {
-            lockedTarget = target;
-            smoothedMotion = Vec3.ZERO;
+        // At least every 30 real seconds invalidate the cached target reference.
+        // Selection already scans every tick, including when NO target is found.
+        // Keep motion smoothing for a reacquired identical entity to avoid aim jumps.
+        LivingEntity previousTarget = lockedTarget;
+        long now = System.nanoTime();
+        if (nextSafetyRescan == 0L || now - nextSafetyRescan >= 0L) {
+            lockedTarget = null;
+            nextSafetyRescan = now + SAFETY_RESCAN_NANOS;
         }
-        if (target == null) return;
+
+        LivingEntity target = selectClosestTarget(filter, limitSquared);
+        if (target != previousTarget) {
+            smoothedMotion = Vec3.ZERO;
+            fireTimer = 0;
+        }
+        lockedTarget = target;
+
+        // Always update target selection even with auto-aim disabled.
+        if (target == null || !aim.get()) return;
 
         Vec3 raw = target.getDeltaMovement();
         if (Double.isFinite(raw.x) && Double.isFinite(raw.y) && Double.isFinite(raw.z)
@@ -163,6 +211,19 @@ public class ProjectileAuraModule extends Module {
         mc.player.setYRot(mc.player.getYRot() + clamp(yawDelta, step));
         mc.player.setXRot(Math.max(-90, Math.min(90,
             mc.player.getXRot() + clamp(pitchDelta, step))));
+
+        // Left click only when the new view is aligned, in gameplay, and
+        // after the configured interval. Uses Meteor's built-in click helper.
+        if (!autoFire.get() || mc.gui.screen() != null) return;
+        fireTimer++;
+        if (fireTimer < fireInterval.get()) return;
+
+        double yawError = Math.abs(Math.IEEEremainder(desiredYaw - mc.player.getYRot(), 360.0));
+        double pitchError = Math.abs(desiredPitch - mc.player.getXRot());
+        if (yawError <= fireTolerance.get() && pitchError <= fireTolerance.get()) {
+            Utils.leftClick();
+            fireTimer = 0;
+        }
     }
 
     private static float clamp(float delta, float cap) {
