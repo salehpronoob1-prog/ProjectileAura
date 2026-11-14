@@ -7,6 +7,8 @@ import meteordevelopment.meteorclient.systems.friends.Friends;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
@@ -21,6 +23,19 @@ public class ProjectileAuraModule extends Module {
     private final SettingGroup targeting = settings.createGroup("Targeting");
     private final SettingGroup rotation = settings.createGroup("Rotation");
     private final SettingGroup attack = settings.createGroup("Attack");
+    private final SettingGroup fishing = settings.createGroup("Offhand AutoFish");
+
+    private final Setting<Boolean> offhandAutoFish = fishing.add(new BoolSetting.Builder()
+        .name("offhand-auto-fish").description("Automatically fish with a rod in the offhand while ProjectileAura fights.")
+        .defaultValue(false).build());
+
+    private final Setting<Integer> fishingRecastDelay = fishing.add(new IntSetting.Builder()
+        .name("fishing-recast-delay").description("Ticks to wait after reeling in before casting again.")
+        .defaultValue(12).min(2).sliderRange(2, 40).visible(offhandAutoFish::get).build());
+
+    private final Setting<Double> biteThreshold = fishing.add(new DoubleSetting.Builder()
+        .name("fishing-bite-threshold").description("Downward bobber velocity used to detect a bite; lower values are more sensitive.")
+        .defaultValue(0.08).min(0.02).sliderRange(0.02, 0.25).visible(offhandAutoFish::get).build());
 
     // Slider ranges are for quick adjustment. Typed numeric values may extend
     // beyond those ranges, subject to physical safety checks in Ballistics.
@@ -113,6 +128,9 @@ public class ProjectileAuraModule extends Module {
     private static final long SAFETY_RESCAN_NANOS = 30_000_000_000L;
     private long nextSafetyRescan;
     private int fireTimer;
+    private int fishingCooldown;
+    private int hookAge;
+    private boolean hadFishingHook;
     private LivingEntity lockedTarget;
     private Vec3 smoothedMotion = Vec3.ZERO;
 
@@ -124,9 +142,51 @@ public class ProjectileAuraModule extends Module {
     @Override public void onActivate() {
         resetTarget();
         nextSafetyRescan = System.nanoTime() + SAFETY_RESCAN_NANOS;
+        resetFishing();
     }
 
-    @Override public void onDeactivate() { resetTarget(); }
+    @Override public void onDeactivate() { resetTarget(); resetFishing(); }
+
+    private void resetFishing() {
+        fishingCooldown = 0;
+        hookAge = 0;
+        hadFishingHook = false;
+    }
+
+    @EventHandler private void onFishingTick(TickEvent.Post event) {
+        if (mc.player == null || mc.level == null || mc.gameMode == null || !offhandAutoFish.get()
+            || !mc.player.getOffhandItem().is(Items.FISHING_ROD)) {
+            resetFishing();
+            return;
+        }
+
+        // Explicitly use the offhand; never switch hotbar slots or rotate the player.
+        // A left-click bow/combat module can therefore keep operating independently.
+        if (fishingCooldown > 0) fishingCooldown--;
+        var hook = mc.player.fishing;
+        if (hook == null) {
+            hookAge = 0;
+            if (hadFishingHook) {
+                hadFishingHook = false;
+                fishingCooldown = Math.max(fishingCooldown, fishingRecastDelay.get());
+            }
+            if (fishingCooldown == 0 && mc.screen == null) {
+                mc.gameMode.useItem(mc.player, InteractionHand.OFF_HAND);
+                fishingCooldown = 10; // Prevent repeated casts while awaiting server confirmation.
+            }
+            return;
+        }
+
+        hadFishingHook = true;
+        hookAge++;
+        // Vanilla bites pull the float sharply downward. Ignore initial casting motion.
+        if (hookAge >= 20 && fishingCooldown == 0 && hook.isInWater()
+            && hook.getDeltaMovement().y < -biteThreshold.get() && mc.screen == null) {
+            mc.gameMode.useItem(mc.player, InteractionHand.OFF_HAND);
+            fishingCooldown = fishingRecastDelay.get();
+            hookAge = 0;
+        }
+    }
 
     private void resetTarget() {
         lockedTarget = null;
