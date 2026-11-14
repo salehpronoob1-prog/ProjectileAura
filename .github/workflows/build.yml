@@ -3,6 +3,8 @@ name: Build ProjectileAura
 
 on:
   push:
+    branches: [main, feature/offhand-autofish]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
