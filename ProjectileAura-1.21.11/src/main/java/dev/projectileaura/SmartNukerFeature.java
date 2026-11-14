@@ -553,9 +553,10 @@ public final class SmartNukerFeature {
 
     private void packetAction(ServerboundPlayerActionPacket.Action action, BlockPos pos, Direction face) {
         if (mc.getConnection() != null) {
-            // Matching Meteor's official Mojang-mapped packet prediction path.
-            mc.gameMode.startPrediction(mc.level, sequence ->
-                new ServerboundPlayerActionPacket(action, pos, face, sequence));
+            // MultiPlayerGameMode.startPrediction is private in Minecraft 1.21.11.
+            // Send the mining action through the public client connection instead.
+            // Sequence 0 is valid for these action packets without client-side prediction.
+            mc.getConnection().send(new ServerboundPlayerActionPacket(action, pos, face, 0));
         }
     }
 
