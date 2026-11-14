@@ -1,6 +1,7 @@
 package dev.projectileaura;
 
 import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.friends.Friends;
@@ -21,6 +22,15 @@ public class ProjectileAuraModule extends Module {
     private final SettingGroup targeting = settings.createGroup("Targeting");
     private final SettingGroup rotation = settings.createGroup("Rotation");
     private final SettingGroup attack = settings.createGroup("Attack");
+    private final SettingGroup smartNukerGroup = settings.createGroup("SmartNuker");
+    private final Setting<Boolean> smartNukerEnabled = smartNukerGroup.add(new BoolSetting.Builder()
+        .name("smart-nuker")
+        .description("Enable smart mining inside ProjectileAura. Mining takes priority over projectile aim while breaking blocks.")
+        .defaultValue(false).build());
+    // The mining feature shares this module's settings and lifecycle;
+    // it is not registered as an independent Meteor module.
+    private final SmartNukerFeature smartNukerFeature = new SmartNukerFeature(settings);
+    private boolean smartNukerWasEnabled;
 
     // Slider ranges are for quick adjustment. Typed numeric values may extend
     // beyond those ranges, subject to physical safety checks in Ballistics.
@@ -124,9 +134,19 @@ public class ProjectileAuraModule extends Module {
     @Override public void onActivate() {
         resetTarget();
         nextSafetyRescan = System.nanoTime() + SAFETY_RESCAN_NANOS;
+        smartNukerWasEnabled = smartNukerEnabled.get();
+        if (smartNukerWasEnabled) smartNukerFeature.activate();
     }
 
-    @Override public void onDeactivate() { resetTarget(); }
+    @Override public void onDeactivate() {
+        resetTarget();
+        smartNukerFeature.deactivate();
+        smartNukerWasEnabled = false;
+    }
+
+    @EventHandler private void onRender(Render3DEvent event) {
+        if (smartNukerEnabled.get()) smartNukerFeature.render(event);
+    }
 
     private void resetTarget() {
         lockedTarget = null;
@@ -168,6 +188,20 @@ public class ProjectileAuraModule extends Module {
     }
 
     @EventHandler private void onTick(TickEvent.Pre event) {
+        boolean miningEnabled = smartNukerEnabled.get();
+        if (miningEnabled != smartNukerWasEnabled) {
+            if (miningEnabled) smartNukerFeature.activate();
+            else smartNukerFeature.deactivate();
+            smartNukerWasEnabled = miningEnabled;
+        }
+        // Avoid competing yaw/pitch and attack actions while the mining
+        // feature actively handles a target. Projectile targeting resumes
+        // automatically when no mineable block is selected.
+        if (miningEnabled && smartNukerFeature.tick()) {
+            resetTarget();
+            return;
+        }
+
         if (mc.player == null || mc.level == null) {
             resetTarget();
             return;
@@ -249,6 +283,9 @@ public class ProjectileAuraModule extends Module {
     }
 
     @Override public String getInfoString() {
-        return lockedTarget == null ? null : lockedTarget.getName().getString();
+        String targetName = lockedTarget == null ? null : lockedTarget.getName().getString();
+        if (!smartNukerEnabled.get()) return targetName;
+        String miningInfo = smartNukerFeature.getInfoString();
+        return targetName == null ? miningInfo : targetName + " | " + miningInfo;
     }
 }
