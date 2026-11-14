@@ -3,6 +3,8 @@ name: Build ProjectileAura
 
 on:
   push:
+    branches: [main, feature/combined-fishing-smartnuker]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
