@@ -15,14 +15,23 @@ import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.ItemLore;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.HashSet;
 import java.util.Set;
 
 /**
  * Read-only GUI inventory dumper for browsing server catalogs.
  *
- * The player opens the GUI and changes pages manually. Each distinct stable
- * page is printed once to local Meteor chat; no commands or clicks are sent.
+ * A capture session lasts from enabling this module until disabling it, even
+ * across new GUI screen instances and inventory page transitions.
+ * Every unique, stable page is appended to the accumulated text, saved on
+ * disk, and copied to the clipboard. No commands or clicks are sent.
  */
 public class GuiDumperModule extends Module {
     private final SettingGroup general = settings.getDefaultGroup();
@@ -34,19 +43,31 @@ public class GuiDumperModule extends Module {
 
     private final Setting<Boolean> showComponents = general.add(new BoolSetting.Builder()
         .name("show-raw-components")
-        .description("Also print the raw item components (can produce very long chat messages).")
+        .description("Also dump raw item components (may produce a very long dump).")
         .defaultValue(false).build());
 
+    private final Setting<Boolean> autoCopy = general.add(new BoolSetting.Builder()
+        .name("auto-copy-all-pages")
+        .description("Copy the entire accumulated GUI dump to the clipboard after every new page.")
+        .defaultValue(true).build());
+
+    private final Setting<Boolean> saveToFile = general.add(new BoolSetting.Builder()
+        .name("save-to-text-file")
+        .description("Keep a full text backup in the Minecraft gui-dumps folder.")
+        .defaultValue(true).build());
+
     private final Set<String> dumpedPages = new HashSet<>();
+    private final StringBuilder allPages = new StringBuilder();
     private AbstractContainerScreen<?> currentScreen;
     private String candidateSnapshot;
     private int stableObservations;
     private int tickCounter;
     private int pageNumber;
+    private Path outputFile;
 
     public GuiDumperModule() {
         super(ProjectileAuraAddon.CATEGORY, "gui-dumper",
-            "Read every item name and lore in an open container GUI; dump each page to local chat.");
+            "Read all item lore in an open GUI, automatically copying and saving every scanned page.");
     }
 
     @Override
@@ -56,6 +77,7 @@ public class GuiDumperModule extends Module {
 
     @Override
     public void onDeactivate() {
+        // Text already copied to the clipboard and saved on disk remains intact.
         resetSession();
     }
 
@@ -64,18 +86,18 @@ public class GuiDumperModule extends Module {
         if (mc.player == null || mc.level == null
             || !(mc.screen instanceof AbstractContainerScreen<?> screen)
             || mc.player.containerMenu != screen.getMenu()) {
-            resetSession();
+            clearCurrentScreen();
             return;
         }
 
-        // Reopening the same inventory starts a fresh capture session.
+        // Page navigation sometimes replaces the screen with another instance.
+        // Keep all previous pages, only reset the stability check.
         if (screen != currentScreen) {
-            resetSession();
+            clearCurrentScreen();
             currentScreen = screen;
         }
 
-        // Three matching observations spaced five ticks apart avoid capturing
-        // partially received page updates.
+        // Three matching samples spaced five ticks apart to avoid incomplete updates.
         if (++tickCounter % 5 != 0) return;
 
         String snapshot = buildSnapshot(screen);
@@ -118,7 +140,10 @@ public class GuiDumperModule extends Module {
         pageNumber++;
         AbstractContainerMenu menu = screen.getMenu();
         String title = screen.getTitle().getString();
-        info("%s", "===== GUI DUMP PAGE " + pageNumber + " | " + title + " =====");
+
+        String header = "===== GUI DUMP PAGE " + pageNumber + " | " + title + " =====";
+        StringBuilder page = new StringBuilder(header).append('\n');
+        info("%s", header);
 
         int count = 0;
         for (int i = 0; i < menu.slots.size(); i++) {
@@ -145,23 +170,63 @@ public class GuiDumperModule extends Module {
                     first = false;
                 }
             }
-            info("%s", entry.toString());
+
+            String itemText = entry.toString();
+            page.append(itemText).append('\n');
+            info("%s", itemText);
 
             if (showComponents.get()) {
-                info("%s", "  Components [" + i + "]: " + stack.getComponents());
+                String componentText = "  Components [" + i + "]: " + stack.getComponents();
+                page.append(componentText).append('\n');
+                info("%s", componentText);
             }
         }
 
-        info("%s", "===== END PAGE " + pageNumber + " (" + count + " items) =====");
+        String footer = "===== END PAGE " + pageNumber + " (" + count + " items) =====";
+        page.append(footer).append("\n\n");
+        allPages.append(page);
+        info("%s", footer);
+
+        // Persist before copying so a system clipboard failure cannot lose data.
+        if (saveToFile.get()) saveAccumulatedText();
+        if (autoCopy.get()) {
+            try {
+                mc.keyboardHandler.setClipboard(allPages.toString());
+                info("Copied all %d page(s) (%d characters) to clipboard. Paste with Ctrl+V.", pageNumber, allPages.length());
+            } catch (Exception exception) {
+                error("Couldn't copy GUI dump: %s", exception.getMessage());
+            }
+        }
     }
 
-    private void resetSession() {
-        dumpedPages.clear();
+    private void saveAccumulatedText() {
+        try {
+            if (outputFile == null) {
+                Path directory = mc.gameDirectory.toPath().resolve("gui-dumps");
+                Files.createDirectories(directory);
+                String stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss"));
+                outputFile = directory.resolve("gui-dump-" + stamp + "-" + System.currentTimeMillis() + ".txt");
+            }
+            Files.writeString(outputFile, allPages.toString(), StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+        } catch (IOException exception) {
+            error("Couldn't save GUI dump: %s", exception.getMessage());
+        }
+    }
+
+    private void clearCurrentScreen() {
         currentScreen = null;
         candidateSnapshot = null;
         stableObservations = 0;
         tickCounter = 0;
+    }
+
+    private void resetSession() {
+        dumpedPages.clear();
+        allPages.setLength(0);
+        clearCurrentScreen();
         pageNumber = 0;
+        outputFile = null;
     }
 
     @Override
