@@ -10,7 +10,7 @@ public class ProjectileAuraAddon extends MeteorAddon {
     @Override public void onRegisterCategories() { Modules.registerCategory(CATEGORY); }
     @Override public void onInitialize() {
         Modules.get().add(new ProjectileAuraModule());
-        Modules.get().add(new BurrowModule());
+        Modules.get().add(new AutoSlayerModule());
         Modules.get().add(new OffhandAutoFishModule());
         Modules.get().add(new SpawnReturnModule());
         Modules.get().add(new DisconnectModule());
