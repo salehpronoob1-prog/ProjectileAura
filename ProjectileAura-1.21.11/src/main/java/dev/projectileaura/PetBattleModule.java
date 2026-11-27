@@ -9,14 +9,14 @@ import net.minecraft.world.inventory.ClickType;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.Items;
 
-/** Right-click the first golden sword in an open container, once per appearance. */
+/** Shift-right-click the first golden sword in an open container, once per appearance. */
 public class PetBattleModule extends Module {
     private AbstractContainerScreen<?> currentScreen;
     private boolean clicked;
 
     public PetBattleModule() {
         super(ProjectileAuraAddon.CATEGORY, "pet-battle",
-            "Automatically right-click a golden sword in an open GUI.");
+            "Automatically shift-right-click a golden sword in an open GUI.");
     }
 
     @Override
@@ -64,9 +64,9 @@ public class PetBattleModule extends Module {
         if (clicked || !menu.getCarried().isEmpty()) return;
 
         clicked = true;
-        // PICKUP with mouse button 1 is a normal right-click on a container slot.
+        // QUICK_MOVE with mouse button 1 represents shift-right-click on a GUI slot.
         mc.gameMode.handleInventoryMouseClick(menu.containerId, target, 1,
-            ClickType.PICKUP, mc.player);
+            ClickType.QUICK_MOVE, mc.player);
     }
 
     private void reset() {
