@@ -22,6 +22,7 @@ import java.util.Map;
 /** Independent visible-block mining module. Uses vanilla mining, not packet bursts. */
 public class MiningAuraModule extends Module {
     public enum Filter { All, Whitelist, Blacklist }
+    public enum RangeShape { Sphere, Cube }
     private final SettingGroup general = settings.getDefaultGroup();
     private final Setting<Filter> filter = general.add(new EnumSetting.Builder<Filter>()
         .name("filter").description("Which block types to mine.")
@@ -30,8 +31,14 @@ public class MiningAuraModule extends Module {
         .name("blocks").description("Block types for whitelist or blacklist mode.")
         .visible(() -> filter.get() != Filter.All).build());
     private final Setting<Double> range = general.add(new DoubleSetting.Builder()
-        .name("range").description("Eye-to-block reach, capped at normal interaction reach.")
-        .defaultValue(4.5).min(1).max(6).sliderRange(1, 6).build());
+        .name("range").description("Maximum distance from the player position to the block surface.")
+        .defaultValue(6.0).min(1).max(6).sliderRange(1, 6).build());
+    private final Setting<RangeShape> rangeShape = general.add(new EnumSetting.Builder<RangeShape>()
+        .name("range-shape").description("Sphere uses distance; cube allows the range independently on each axis.")
+        .defaultValue(RangeShape.Sphere).build());
+    private final Setting<Boolean> vanillaReach = general.add(new BoolSetting.Builder()
+        .name("respect-vanilla-reach").description("Use the vanilla eye-to-block reach limit as well. Disable for servers with custom mining reach.")
+        .defaultValue(false).build());
     private final Setting<Integer> fov = general.add(new IntSetting.Builder()
         .name("field-of-view").description("Full angle around the current view; 360 mines in every direction.")
         .defaultValue(360).min(1).max(360).sliderRange(30, 360).build());
@@ -112,9 +119,10 @@ public class MiningAuraModule extends Module {
         // Recheck the actual view ray before sending a normal mining action.
         Vec3 eye = mc.player.getEyePosition();
         BlockHitResult hit = mc.level.clip(new ClipContext(eye,
-            eye.add(mc.player.getViewVector(1f).scale(reach())),
+            eye.add(mc.player.getViewVector(1f).scale(eye.distanceTo(target.point()) + 0.05)),
             ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, mc.player));
-        if (hit.getType() != HitResult.Type.BLOCK || !hit.getBlockPos().equals(target.pos())) {
+        if (hit.getType() != HitResult.Type.BLOCK || !hit.getBlockPos().equals(target.pos())
+            || !inRange(hit.getLocation())) {
             fail();
             return;
         }
@@ -135,7 +143,21 @@ public class MiningAuraModule extends Module {
         readyAt = ticks + Math.max(1, delay.get());
     }
 
-    private double reach() { return Math.min(range.get(), mc.player.blockInteractionRange()); }
+    private double reach() { return range.get(); }
+
+    private double rangeDistance(double dx, double dy, double dz) {
+        return rangeShape.get() == RangeShape.Cube
+            ? Math.max(dx * dx, Math.max(dy * dy, dz * dz))
+            : dx * dx + dy * dy + dz * dz;
+    }
+
+    private boolean inRange(Vec3 point) {
+        Vec3 d = point.subtract(mc.player.position());
+        if (rangeDistance(d.x, d.y, d.z) > reach() * reach() + 1e-6) return false;
+        if (!vanillaReach.get()) return true;
+        double cap = mc.player.blockInteractionRange();
+        return mc.player.getEyePosition().distanceToSqr(point) <= cap * cap + 1e-6;
+    }
 
     private boolean allowed(BlockPos pos, BlockState state) {
         if (state.isAir() || state.getDestroySpeed(mc.level, pos) < 0
@@ -148,18 +170,18 @@ public class MiningAuraModule extends Module {
     }
 
     private Aim findTarget() {
-        Vec3 eye = mc.player.getEyePosition();
-        BlockPos center = BlockPos.containing(eye);
+        Vec3 origin = mc.player.position();
+        BlockPos center = BlockPos.containing(origin);
         int radius = (int) Math.ceil(reach()) + 1;
         Aim best = null;
         for (BlockPos p : BlockPos.betweenClosed(center.offset(-radius, -radius, -radius),
             center.offset(radius, radius, radius))) {
             // Cheap bounding-box distance test before any raycasts.
-            double dx = Math.max(0, Math.max(p.getX() - eye.x, eye.x - p.getX() - 1));
-            double dy = Math.max(0, Math.max(p.getY() - eye.y, eye.y - p.getY() - 1));
-            double dz = Math.max(0, Math.max(p.getZ() - eye.z, eye.z - p.getZ() - 1));
-            double lower = dx * dx + dy * dy + dz * dz;
-            if (lower > reach() * reach() || (best != null && lower >= best.distance())) continue;
+            double dx = Math.max(0, Math.max(p.getX() - origin.x, origin.x - p.getX() - 1));
+            double dy = Math.max(0, Math.max(p.getY() - origin.y, origin.y - p.getY() - 1));
+            double dz = Math.max(0, Math.max(p.getZ() - origin.z, origin.z - p.getZ() - 1));
+            double lower = rangeDistance(dx, dy, dz);
+            if (lower > reach() * reach() + 1e-6) continue;
             if (!allowed(p, mc.level.getBlockState(p))) continue;
             Aim candidate = visibleAim(p.immutable(), true);
             if (candidate != null && (best == null || candidate.distance() < best.distance())) best = candidate;
@@ -170,7 +192,6 @@ public class MiningAuraModule extends Module {
     private Aim visibleAim(BlockPos pos, boolean checkFov) {
         Vec3 eye = mc.player.getEyePosition();
         Vec3 view = mc.player.getViewVector(1f);
-        double max = reach() * reach();
         double cos = Math.cos(Math.toRadians(fov.get() / 2.0));
         Aim best = null;
         // Sample the center and inner corners of all six faces. The actual first
@@ -195,7 +216,7 @@ public class MiningAuraModule extends Module {
                     ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, mc.player));
                 if (hit.getType() != HitResult.Type.BLOCK || !hit.getBlockPos().equals(pos)) continue;
                 double distance = eye.distanceToSqr(hit.getLocation());
-                if (distance <= max && (best == null || distance < best.distance()))
+                if (inRange(hit.getLocation()) && (best == null || distance < best.distance()))
                     best = new Aim(pos, hit.getDirection(), point, distance);
             }
         }
