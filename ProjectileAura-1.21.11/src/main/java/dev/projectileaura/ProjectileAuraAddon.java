@@ -17,6 +17,7 @@ public class ProjectileAuraAddon extends MeteorAddon {
         Modules.get().add(new AutoSackModule());
         Modules.get().add(new GuiDumperModule());
         Modules.get().add(new PetBattleModule());
+        Modules.get().add(new SafeFlightModule());
     }
     @Override public String getPackage() { return "dev.projectileaura"; }
 }
