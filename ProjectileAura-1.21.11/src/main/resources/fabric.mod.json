@@ -20,8 +20,5 @@
     "java": ">=21",
     "minecraft": "1.21.11",
     "meteor-client": "*"
-  },
-  "mixins": [
-    "projectile-aura.mixins.json"
-  ]
+  }
 }
