@@ -7,7 +7,7 @@ import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
-import net.minecraft.world.InteractionHand;
+import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.Block;
@@ -48,7 +48,6 @@ public class MiningAuraModule extends Module {
     private record Aim(BlockPos pos, Direction face, Vec3 point, double distance) {}
     private Aim target;
     private BlockState originalState;
-    private boolean started;
     private int ticks, readyAt, age;
     private double progress;
     private Object world;
@@ -63,15 +62,14 @@ public class MiningAuraModule extends Module {
     @Override public void onDeactivate() { stop(); reset(); }
 
     private void reset() {
-        target = null; originalState = null; started = false;
+        target = null; originalState = null;
         ticks = 0; readyAt = 0; age = 0; progress = 0;
         world = null; retryAfter.clear();
     }
 
     private void stop() {
-        if (started && mc.gameMode != null && mc.player != null && world == mc.level)
-            mc.gameMode.stopDestroyBlock();
-        target = null; originalState = null; started = false; age = 0; progress = 0;
+        // Meteor cancels its own mining when no break is requested this tick.
+        target = null; originalState = null; age = 0; progress = 0;
     }
 
     @EventHandler private void onTick(TickEvent.Pre event) {
@@ -103,7 +101,7 @@ public class MiningAuraModule extends Module {
         if (ticks < readyAt) return;
         if (target == null) {
             target = findTarget();
-            if (target == null) return;
+            if (target == null) { readyAt = ticks + 4; return; }
             originalState = mc.level.getBlockState(target.pos());
             if (autoTool.get()) selectTool(originalState);
         }
@@ -120,13 +118,8 @@ public class MiningAuraModule extends Module {
             fail();
             return;
         }
-        if (!started) {
-            started = mc.gameMode.startDestroyBlock(target.pos(), hit.getDirection());
-            if (!started) { fail(); return; }
-        } else {
-            mc.gameMode.continueDestroyBlock(target.pos(), hit.getDirection());
-        }
-        mc.player.swing(InteractionHand.MAIN_HAND);
+        // Keep vanilla input handling from cancelling automatic mining.
+        if (!BlockUtils.breakBlock(target.pos(), true)) { fail(); return; }
         age++;
         double step = Math.max(0, originalState.getDestroyProgress(mc.player, mc.level, target.pos()));
         progress += step;
