@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.projectileaura.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "FlightSafetyMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
